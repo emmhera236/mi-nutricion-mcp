@@ -1,6 +1,11 @@
+import os
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("Mi Nutrición")
+mcp = FastMCP(
+    "Mi Nutrición",
+    host="0.0.0.0",
+    port=int(os.environ.get("PORT", 8000))
+)
 
 # Inventario temporal de la despensa
 despensa = {}
