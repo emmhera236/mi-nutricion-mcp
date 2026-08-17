@@ -69,7 +69,7 @@ inicializar_base_de_datos()
 # ============================================================
 
 @mcp.tool()
-def ver_despensa() -> list:
+def ver_despensa() -> str:
     """Muestra todos los ingredientes registrados en la despensa."""
 
     with psycopg.connect(DATABASE_URL) as conn:
@@ -81,15 +81,20 @@ def ver_despensa() -> list:
             """)
             filas = cur.fetchall()
 
-    return [
-        {
-            "ingrediente": fila[0],
-            "cantidad": float(fila[1]),
-            "unidad": fila[2],
-            "fecha_caducidad": fila[3] or ""
-        }
-        for fila in filas
-    ]
+    if not filas:
+        return "La despensa está vacía."
+
+    resultado = ["Despensa actual:"]
+
+    for nombre, cantidad, unidad, fecha_caducidad in filas:
+        linea = f"- {nombre}: {cantidad} {unidad}"
+
+        if fecha_caducidad:
+            linea += f" (caduca: {fecha_caducidad})"
+
+        resultado.append(linea)
+
+    return "\n".join(resultado)
 
 
 @mcp.tool()
