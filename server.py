@@ -1,4 +1,5 @@
 import os
+import psycopg
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP(
@@ -7,14 +8,50 @@ mcp = FastMCP(
     port=int(os.environ.get("PORT", 8000))
 )
 
-# Inventario temporal de la despensa
-despensa = {}
+DATABASE_URL = os.environ["DATABASE_URL"]
+
+
+def inicializar_base_de_datos():
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ingredientes (
+                    id SERIAL PRIMARY KEY,
+                    nombre TEXT UNIQUE NOT NULL,
+                    cantidad NUMERIC NOT NULL,
+                    unidad TEXT NOT NULL,
+                    fecha_caducidad TEXT DEFAULT ''
+                )
+            """)
+        conn.commit()
+
+
+inicializar_base_de_datos()
 
 
 @mcp.tool()
-def ver_despensa() -> dict:
-    """Muestra todos los ingredientes actualmente registrados en la despensa."""
-    return despensa
+def ver_despensa() -> list:
+    """Muestra todos los ingredientes registrados en la despensa."""
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT nombre, cantidad, unidad, fecha_caducidad
+                FROM ingredientes
+                ORDER BY nombre
+            """)
+
+            filas = cur.fetchall()
+
+    return [
+        {
+            "ingrediente": fila[0],
+            "cantidad": float(fila[1]),
+            "unidad": fila[2],
+            "fecha_caducidad": fila[3] or ""
+        }
+        for fila in filas
+    ]
 
 
 @mcp.tool()
@@ -25,16 +62,29 @@ def agregar_ingrediente(
     fecha_caducidad: str = ""
 ) -> str:
     """Agrega un ingrediente a la despensa."""
-    
+
     nombre = ingrediente.lower().strip()
 
-    despensa[nombre] = {
-        "cantidad": cantidad,
-        "unidad": unidad,
-        "fecha_caducidad": fecha_caducidad
-    }
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO ingredientes
+                    (nombre, cantidad, unidad, fecha_caducidad)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (nombre)
+                DO UPDATE SET
+                    cantidad = ingredientes.cantidad + EXCLUDED.cantidad,
+                    unidad = EXCLUDED.unidad,
+                    fecha_caducidad = CASE
+                        WHEN EXCLUDED.fecha_caducidad <> ''
+                        THEN EXCLUDED.fecha_caducidad
+                        ELSE ingredientes.fecha_caducidad
+                    END
+            """, (nombre, cantidad, unidad, fecha_caducidad))
 
-    return f"Se agregó {cantidad} {unidad} de {nombre} a la despensa."
+        conn.commit()
+
+    return f"Se agregó {cantidad} {unidad} de {nombre}."
 
 
 @mcp.tool()
@@ -44,20 +94,54 @@ def actualizar_ingrediente(
     unidad: str = "",
     fecha_caducidad: str = ""
 ) -> str:
-    """Actualiza la cantidad disponible de un ingrediente."""
+    """Actualiza la cantidad de un ingrediente."""
 
     nombre = ingrediente.lower().strip()
 
-    if nombre not in despensa:
-        return f"{nombre} no está registrado en la despensa."
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
 
-    despensa[nombre]["cantidad"] = cantidad
+            cur.execute(
+                "SELECT id FROM ingredientes WHERE nombre = %s",
+                (nombre,)
+            )
 
-    if unidad:
-        despensa[nombre]["unidad"] = unidad
+            if cur.fetchone() is None:
+                return f"{nombre} no está registrado en la despensa."
 
-    if fecha_caducidad:
-        despensa[nombre]["fecha_caducidad"] = fecha_caducidad
+            if unidad and fecha_caducidad:
+                cur.execute("""
+                    UPDATE ingredientes
+                    SET cantidad = %s,
+                        unidad = %s,
+                        fecha_caducidad = %s
+                    WHERE nombre = %s
+                """, (cantidad, unidad, fecha_caducidad, nombre))
+
+            elif unidad:
+                cur.execute("""
+                    UPDATE ingredientes
+                    SET cantidad = %s,
+                        unidad = %s
+                    WHERE nombre = %s
+                """, (cantidad, unidad, nombre))
+
+            elif fecha_caducidad:
+                cur.execute("""
+                    UPDATE ingredientes
+                    SET cantidad = %s,
+                        fecha_caducidad = %s
+                    WHERE nombre = %s
+                """, (cantidad, fecha_caducidad, nombre))
+
+            else:
+                cur.execute("""
+                    UPDATE ingredientes
+                    SET cantidad = %s
+                    WHERE nombre = %s
+                """, (cantidad, nombre))
+
+        conn.commit()
 
     return f"Se actualizó {nombre}."
 
@@ -67,23 +151,46 @@ def consumir_ingrediente(
     ingrediente: str,
     cantidad: float
 ) -> str:
-    """Reduce la cantidad disponible de un ingrediente después de consumirlo."""
+    """Reduce la cantidad disponible después de consumir un ingrediente."""
 
     nombre = ingrediente.lower().strip()
 
-    if nombre not in despensa:
-        return f"{nombre} no está registrado en la despensa."
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
 
-    despensa[nombre]["cantidad"] -= cantidad
+            cur.execute(
+                "SELECT cantidad, unidad FROM ingredientes WHERE nombre = %s",
+                (nombre,)
+            )
 
-    if despensa[nombre]["cantidad"] <= 0:
-        del despensa[nombre]
-        return f"{nombre} se terminó y fue eliminado de la despensa."
+            fila = cur.fetchone()
 
-    return (
-        f"Quedan {despensa[nombre]['cantidad']} "
-        f"{despensa[nombre]['unidad']} de {nombre}."
-    )
+            if fila is None:
+                return f"{nombre} no está registrado en la despensa."
+
+            cantidad_actual = float(fila[0])
+            unidad = fila[1]
+            nueva_cantidad = cantidad_actual - cantidad
+
+            if nueva_cantidad <= 0:
+                cur.execute(
+                    "DELETE FROM ingredientes WHERE nombre = %s",
+                    (nombre,)
+                )
+
+                conn.commit()
+
+                return f"{nombre} se terminó y fue eliminado de la despensa."
+
+            cur.execute("""
+                UPDATE ingredientes
+                SET cantidad = %s
+                WHERE nombre = %s
+            """, (nueva_cantidad, nombre))
+
+        conn.commit()
+
+    return f"Quedan {nueva_cantidad} {unidad} de {nombre}."
 
 
 @mcp.tool()
@@ -92,30 +199,47 @@ def eliminar_ingrediente(ingrediente: str) -> str:
 
     nombre = ingrediente.lower().strip()
 
-    if nombre not in despensa:
-        return f"{nombre} no está registrado."
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM ingredientes WHERE nombre = %s",
+                (nombre,)
+            )
 
-    del despensa[nombre]
+            eliminado = cur.rowcount
+
+        conn.commit()
+
+    if eliminado == 0:
+        return f"{nombre} no está registrado."
 
     return f"{nombre} fue eliminado de la despensa."
 
 
 @mcp.tool()
 def ingredientes_por_caducar() -> list:
-    """Devuelve los ingredientes que tienen una fecha de caducidad registrada."""
+    """Muestra los ingredientes que tienen una fecha de caducidad registrada."""
 
-    resultado = []
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT nombre, cantidad, unidad, fecha_caducidad
+                FROM ingredientes
+                WHERE fecha_caducidad <> ''
+                ORDER BY fecha_caducidad
+            """)
 
-    for nombre, datos in despensa.items():
-        if datos["fecha_caducidad"]:
-            resultado.append({
-                "ingrediente": nombre,
-                "cantidad": datos["cantidad"],
-                "unidad": datos["unidad"],
-                "fecha_caducidad": datos["fecha_caducidad"]
-            })
+            filas = cur.fetchall()
 
-    return resultado
+    return [
+        {
+            "ingrediente": fila[0],
+            "cantidad": float(fila[1]),
+            "unidad": fila[2],
+            "fecha_caducidad": fila[3]
+        }
+        for fila in filas
+    ]
 
 
 if __name__ == "__main__":
