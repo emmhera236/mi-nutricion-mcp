@@ -537,4 +537,8 @@ def resumen_nutricional_hoy() -> dict:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    mcp.run(
+        transport="streamable-http",
+        stateless_http=True,
+        json_response=True
+    )
